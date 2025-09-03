@@ -12,7 +12,7 @@ API_KEY = os.getenv("GOOGLE_API_KEY")
 
 client = genai.Client(api_key=API_KEY)
 
-TEMPLATE = "Generate a representative scene from the US state {state}, minimalist, aquarelle, plain bright exactly white background, no text. The image should occupy roughly a square area but fade naturally into white around the edges without any clear border."
+TEMPLATE = "Generate a representative scene from the US state {state}, minimalist, aquarelle, plain bright exactly white background, no text. The image should occupy roughly a square area but without a clear border. DO NOT include the shape of the state in the image."
 
 
 def make_image(state: str, dir: str = "state_images"):
@@ -36,4 +36,4 @@ def make_image(state: str, dir: str = "state_images"):
 
 if __name__ == "__main__":
     state = input("state >> ")
-    make_image(state=state)
+    make_image(state=state, dir="custom")

@@ -1,15 +1,7 @@
-#!/usr/bin/env python3
-"""
-Generate playing cards with US state information and mini maps.
-
-This version uses fonttools to convert all text elements into paths,
-removing dependencies on external fonts in the output SVG files.
-"""
 import json
 import urllib.request
 from typing import Tuple, Optional, List, Dict
 import xml.etree.ElementTree as ET
-import hashlib
 import os
 import base64
 import csv
@@ -208,28 +200,6 @@ def get_image_dimensions(image_path: str) -> Optional[Tuple[int, int]]:
     except Exception as e:
         print(f"Warning: Could not read dimensions from image {image_path}: {e}")
         return None
-
-
-def generate_state_code(state_name: str, state_abbr: str) -> str:
-    """
-    Generate a unique 3-letter code for a state.
-    Args:
-        state_name: State name
-        state_abbr: State abbreviation
-    Returns:
-        3-letter code
-    """
-    # Create a hash of the state name and abbreviation
-    combined = f"{state_name.upper()}{state_abbr.upper()}"
-    hash_obj = hashlib.md5(combined.encode())
-    hash_hex = hash_obj.hexdigest()
-    # Convert hash to uppercase letters
-    code = ""
-    for i in range(0, 6, 2):
-        # Convert pairs of hex digits to letters A-Z
-        num = int(hash_hex[i : i + 2], 16) % 26
-        code += chr(65 + num)
-    return code[:3]
 
 
 def get_us_states_geojson(
@@ -457,26 +427,16 @@ def load_card_template(filepath: str = TEMPLATE_PATH) -> str:
     """
     Load the card template SVG as a string.
     """
-    try:
-        with open(filepath, "r") as f:
-            content = f.read()
-        # Remove any namespace prefixes if present
-        content = content.replace("ns0:", "").replace(":ns0", "")
-        return content
-    except Exception as e:
-        print(f"Error loading card template: {e}")
-        # Return a basic card template if file not found
-        return """<svg width="180" height="270" viewBox="0 0 180 270" fill="none" xmlns="http://www.w3.org/2000/svg">
-<rect width="180" height="270" fill="white"/>
-<path d="M9 251.919C9 256.89 13.029 260.919 18 260.919H162.012C166.983 260.919 171.012 256.89 171.012 251.919V17.919C171.012 12.948 166.983 8.91901 162.012 8.91901H18C13.029 8.91901 9 12.948 9 17.919V251.919Z" stroke="#EC1E28"/>
-<path d="M18 21.825C18 19.669 19.525 17.925 21.408 17.925H158.593C160.476 17.925 162.001 19.669 162.001 21.825V248.013C162.001 250.167 160.476 251.913 158.593 251.913H21.408C19.526 251.913 18 250.167 18 248.013V21.825Z" stroke="#2BA6DE" stroke-dasharray="1.36 1.36"/>
-</svg>"""
+    with open(filepath, "r") as f:
+        content = f.read()
+    # Remove any namespace prefixes if present
+    content = content.replace("ns0:", "").replace(":ns0", "")
+    return content
 
 
 def create_state_card(
     state_name: str,
     state_abbr: str,
-    code: str = None,
     image_path: str = None,
     template_path: str = TEMPLATE_PATH,
 ) -> str:
@@ -485,7 +445,6 @@ def create_state_card(
     Args:
         state_name: Full state name
         state_abbr: State abbreviation
-        code: Optional 3-letter code for the state
         image_path: Path to state image
         template_path: Path to card template
     Returns:
@@ -522,9 +481,9 @@ def create_state_card(
             img_height = original_height * scale_ratio
 
             # Center the resized image in the same area as before
-            # The desired center point is (90, 125)
+            # The desired center point is (90, 130)
             img_x = (CARD_WIDTH / 2) - (img_width / 2)
-            img_y = 125 - (img_height / 2)
+            img_y = 130 - (img_height / 2)
 
             # Now, embed the image data as base64
             image_data = embed_image_as_base64(image_path)
@@ -584,40 +543,14 @@ def create_state_card(
     additional_content.append(f'\n{ET.tostring(state_info_group, encoding="unicode")}')
 
     # --- Mini Map with State Highlighted ---
-    map_x, map_y = 20, CARD_HEIGHT - MAP_HEIGHT - 20
+    # Center the map horizontally: (CARD_WIDTH - MAP_WIDTH) / 2
+    map_x = (CARD_WIDTH - MAP_WIDTH) // 2
+    map_y = CARD_HEIGHT - MAP_HEIGHT - 20
     map_group = create_mini_map_group(state_name, map_x, map_y)
     additional_content.append(f'\n{ET.tostring(map_group, encoding="unicode")}')
 
-    # --- State Code Circle ---
-    if code is None:
-        code = generate_state_code(state_name, state_abbr)
-
-    code_group = ET.Element("g", {"id": "state-code"})
-    ET.SubElement(
-        code_group,
-        "circle",
-        {
-            "cx": str(CARD_WIDTH - 40),
-            "cy": str(CARD_HEIGHT - 40),
-            "r": "16",
-            "fill": "#2BA6DE",
-            "opacity": "0.1",
-        },
-    )
-    code_paths = text_to_svg_group(
-        text=code,
-        x=CARD_WIDTH - 40,
-        y=CARD_HEIGHT - 36,
-        font_family="Courier New",
-        font_size=15,
-        font_weight="bold",
-        text_anchor="middle",
-        fill="#2BA6DE",
-    )
-    if code_paths is not None:
-        code_group.append(code_paths)
-
-    additional_content.append(f'\n{ET.tostring(code_group, encoding="unicode")}')
+    # --- State Code Circle REMOVED ---
+    # The three-letter code element has been removed per requirements
 
     # Combine all elements
     final_svg = (
@@ -632,7 +565,6 @@ def create_state_card(
 def generate_state_card_file(
     state_name: str,
     state_abbr: str,
-    code: str = None,
     image_path: str = None,
     output_dir: str = "state_cards",
     template_path: str = TEMPLATE_PATH,
@@ -656,7 +588,6 @@ def generate_state_card_file(
     svg_content = create_state_card(
         state_name,
         state_abbr,
-        code=code,
         image_path=image_path,
         template_path=template_path,
     )
@@ -675,38 +606,26 @@ def main():
     print("=" * 50)
 
     # Read states from CSV file
-    # Expected columns: Name, Abbreviation, Code (optional)
+    # Expected columns: Name, Abbreviation
     csv_file = "states.csv"
 
     try:
         with open(csv_file, "r") as f:
             data = csv.DictReader(f)
-            codes_seen = set()
 
             for i, elem in enumerate(data):
-                if i > 0:
-                    break
+                # if i > 0:
+                #     break
                 try:
                     # Read state information from CSV
                     state_name = elem.get("Name", "").strip()
                     state_abbr = elem.get("Abbreviation", "").strip()
-                    code = elem.get("Code", None)
 
                     if not state_name or not state_abbr:
                         print(
                             f"Warning: Skipping row {i+1} - missing Name or Abbreviation"
                         )
                         continue
-
-                    # Check for duplicate codes
-                    if code is not None:
-                        code = code.strip() if code else None
-                        if code and code in codes_seen:
-                            raise ValueError(
-                                f"Duplicate code {code} for {state_name}, {state_abbr}"
-                            )
-                        if code:
-                            codes_seen.add(code)
 
                     # Generate image using make_image from generate_state_images
                     img_path = make_image(state=state_name)
@@ -715,7 +634,6 @@ def main():
                     generate_state_card_file(
                         state_name=state_name,
                         state_abbr=state_abbr,
-                        code=code,
                         image_path=img_path,
                         output_dir="state_cards",
                         template_path=TEMPLATE_PATH,
@@ -728,14 +646,12 @@ def main():
 
     except FileNotFoundError:
         print(f"Error: CSV file '{csv_file}' not found.")
-        print(
-            "Please create a CSV file with columns: Name, Abbreviation, Code (optional)"
-        )
+        print("Please create a CSV file with columns: Name, Abbreviation")
         print("\nExample CSV content:")
-        print("Name,Abbreviation,Code")
-        print("California,CA,CAL")
-        print("Texas,TX,TEX")
-        print("New York,NY,")
+        print("Name,Abbreviation")
+        print("California,CA")
+        print("Texas,TX")
+        print("New York,NY")
         return
     except Exception as e:
         print(f"Error reading CSV file: {e}")
