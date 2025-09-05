@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate playing cards with country information and mini continent maps.
+Generate playing cards with country information and mini maps.
 
 This version uses fonttools to convert all text elements into paths,
 removing dependencies on external fonts in the output SVG files.
@@ -17,33 +17,12 @@ from generate_country_images import make_image
 from PIL import Image
 import math
 
-
 FONT_MAPPING: Dict[Tuple[str, str], str] = {
     ("Arial", "normal"): "/System/Library/Fonts/Supplemental/Arial.ttf",
     ("Arial", "bold"): "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     ("Courier New", "bold"): "/System/Library/Fonts/Supplemental/Courier New Bold.ttf",
 }
 
-# Fixed continent windows
-# Format: (min_lon, min_lat, max_lon, max_lat)
-CONTINENT_WINDOWS: Dict[str, Dict] = {
-    "europe": {"bbox": (-11.5, 34.0, 45.5, 71.5)},  # excludes Azores (-31°)
-    "africa": {"bbox": (-20.0, -36.0, 52.0, 38.0)},
-    "asia": {"bbox": (25.0, -10.0, 170.0, 80.0)},
-    "north america": {"bbox": (-170.0, 5.0, -52.0, 83.0)},
-    "south america": {"bbox": (-82.0, -56.0, -34.0, 13.0)},
-    # Oceania spans the dateline; use wrap_center=160 so 200°E is "just east"
-    "oceania": {"bbox": (110.0, -50.0, 210.0, 10.0), "wrap_center": 160.0},
-    "antarctica": {"bbox": (-180.0, -90.0, 180.0, -60.0)},
-}
-
-# Per-country overrides if you ever need them
-COUNTRY_WINDOWS: Dict[str, Dict] = {
-    # "portugal": {"bbox": (-12.0, 34.0, 43.0, 72.0)},
-    # "france": {"bbox": (-11.5, 34.0, 45.5, 71.5)},
-}
-
-# A simple cache to avoid reloading font files from disk repeatedly.
 _FONT_CACHE: Dict[Tuple[str, str], TTFont] = {}
 _GEO_DATA_CACHE: Optional[Dict] = None
 
@@ -59,6 +38,130 @@ def _rewrap_lon(lon: float, center: float) -> float:
     while lon >= span_max:
         lon -= 360.0
     return lon
+
+
+def _unwrap_mean_lon(lons: List[float]) -> float:
+    """Compute a mean longitude by unwrapping to avoid dateline issues."""
+    if not lons:
+        return 0.0
+    base = lons[0]
+    total = 0.0
+    prev = base
+    for lon in lons:
+        # unwrap relative to previous so jumps are < 180°
+        while lon - prev > 180.0:
+            lon -= 360.0
+        while lon - prev < -180.0:
+            lon += 360.0
+        total += lon
+        prev = lon
+    mean = total / len(lons)
+    # wrap back to [-180, 180]
+    while mean <= -180.0:
+        mean += 360.0
+    while mean > 180.0:
+        mean -= 360.0
+    return mean
+
+
+def _country_centroid(features: List[Dict]) -> Tuple[float, float]:
+    """
+    Very simple geographic centroid for a country's features.
+    Uses an unwrapped mean of longitudes and arithmetic mean of latitudes.
+    """
+    lons: List[float] = []
+    lats: List[float] = []
+    for f in features:
+        geom = f.get("geometry", {})
+        coords = geom.get("coordinates")
+        gtype = geom.get("type")
+        if not coords:
+            continue
+        polygons = (
+            [coords]
+            if gtype == "Polygon"
+            else coords if gtype == "MultiPolygon" else []
+        )
+        for poly in polygons:
+            # poly may be [ring] or [[ring, ...]]
+            rings = [poly] if (poly and isinstance(poly[0][0], float)) else poly
+            for ring in rings:
+                for lon, lat in ring:
+                    lons.append(lon)
+                    lats.append(lat)
+    if not lons or not lats:
+        return (0.0, 0.0)
+    return (_unwrap_mean_lon(lons), sum(lats) / len(lats))
+
+
+def _geojson_to_ortho_path(
+    coordinates: List,
+    lon0: float,
+    lat0: float,
+    radius: float,
+    cx: float,
+    cy: float,
+) -> str:
+    """
+    Convert (Multi)Polygon coordinates to an SVG path using an orthographic projection
+    centered at (lon0, lat0). Points on the far hemisphere are skipped.
+    """
+    if not coordinates:
+        return ""
+
+    def _project(lon_deg: float, lat_deg: float) -> Tuple[float, float, bool]:
+        # Normalize Δλ into [-180, 180] before converting to radians
+        dlon = lon_deg - lon0
+        while dlon > 180.0:
+            dlon -= 360.0
+        while dlon < -180.0:
+            dlon += 360.0
+        lam = math.radians(dlon)
+        phi = math.radians(lat_deg)
+        lam0 = 0.0  # after normalization above
+        phi0 = math.radians(lat0)
+
+        cosc = math.sin(phi0) * math.sin(phi) + math.cos(phi0) * math.cos(
+            phi
+        ) * math.cos(lam - lam0)
+        visible = cosc > 0.0
+
+        x = radius * (math.cos(phi) * math.sin(lam - lam0))
+        y = radius * (
+            math.cos(phi0) * math.sin(phi)
+            - math.sin(phi0) * math.cos(phi) * math.cos(lam - lam0)
+        )
+        # SVG y goes down; flip
+        return (cx + x, cy - y, visible)
+
+    path_parts: List[str] = []
+    polygons = (
+        [coordinates]
+        if (coordinates and isinstance(coordinates[0][0][0], float))
+        else coordinates
+    )
+    for poly in polygons:
+        rings = [poly] if (poly and isinstance(poly[0][0], float)) else poly
+        for ring in rings:
+            started = False
+            last_vis = False
+            if len(ring) > 0 and not isinstance(ring[0], list):
+                ring = [ring]
+            for i, (lon, lat) in enumerate(ring):
+                x, y, vis = _project(lon, lat)
+                if vis:
+                    if not started:
+                        path_parts.append(f"M {x:.2f},{y:.2f}")
+                        started = True
+                    else:
+                        # if we were previously invisible, start a new subpath to avoid drawing across the horizon
+                        if not last_vis:
+                            path_parts.append(f"M {x:.2f},{y:.2f}")
+                        else:
+                            path_parts.append(f"L {x:.2f},{y:.2f}")
+                last_vis = vis
+            # Don't close with Z — closing can draw straight lines across the hidden hemisphere
+    return " ".join(path_parts)
 
 
 def get_font(family: str, weight: str) -> Optional[TTFont]:
@@ -228,8 +331,7 @@ def embed_image_as_base64(image_path: str) -> str:
 
 def get_geodata() -> Optional[Dict]:
     """
-    Fetch world countries GeoJSON data, prioritizing a source with continent info.
-    Caches the result to avoid repeated downloads.
+    Fetch world countries GeoJSON data
     """
     global _GEO_DATA_CACHE
     if _GEO_DATA_CACHE:
@@ -333,149 +435,127 @@ def geojson_to_svg_path(
     return " ".join(path_parts)
 
 
-def lookup_continent(country: str):
-    file = "continents.csv"
-    with open(file, "r") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if row["Name"].lower().strip() == country.lower().strip():
-                return row["Continent"]
-    print(f"Warning: No continent found for country '{country}'.")
-    return "unknown"
-
-
-def create_mini_map_group(country: str, continent: str) -> ET.Element:
+def create_mini_map_group(country: str) -> ET.Element:
     """
-    Create a group element containing the continent map with the country highlighted.
+    Create a group element containing a globe (orthographic projection) centered
+    on the target country, with that country highlighted in red.
     """
     world_data = get_geodata()
-    # Filter features for the given continent
     features = world_data.get("features", [])
-    named_features = [
-        (f.get("properties", {}).get("name", "").lower(), f) for f in features
-    ]
-    continent_features = [
-        f
-        for name, f in named_features
-        if lookup_continent(name).lower() == continent.lower()
-    ]
 
-    if not continent_features:
-        raise ValueError(f"Warning: No countries found for continent '{continent}'.")
-
-    # Choose a fixed window: country override, else continent default, else fallback to computed
     lower_country = country.lower().strip()
-    lower_continent = continent.lower().strip()
 
-    window_cfg = COUNTRY_WINDOWS.get(lower_country) or CONTINENT_WINDOWS.get(
-        lower_continent
-    )
-    wrap_center = None
-    if window_cfg and "bbox" in window_cfg:
-        min_lon, min_lat, max_lon, max_lat = window_cfg["bbox"]
-        wrap_center = window_cfg.get("wrap_center")
-    else:
-        # Fallback: compute from data (may be "too big" for France/US etc.)
-        min_lon, min_lat, max_lon, max_lat = calculate_bounding_box(continent_features)
+    # Some countries are represented by sub-features in some datasets (e.g., UK)
+    special_countries = {
+        "united kingdom": ["england", "wales", "scotland", "northern ireland"],
+    }
 
-    # Add a tiny padding and match aspect ratio to avoid distortion
-    padding_factor = 1.02  # 2% pad
-    lon_range = (max_lon - min_lon) * padding_factor
-    lat_range = (max_lat - min_lat) * padding_factor
-    center_lon = (min_lon + max_lon) / 2.0
-    center_lat = (min_lat + max_lat) / 2.0
+    target_features = [
+        f
+        for f in features
+        if f.get("properties", {}).get("name", "").lower() == lower_country
+        or f.get("properties", {}).get("name_long", "").lower() == lower_country
+        or f.get("properties", {}).get("name_en", "").lower() == lower_country
+        or f.get("properties", {}).get("name", "").lower()
+        in special_countries.get(lower_country, [])
+        or f.get("properties", {}).get("name_long", "").lower()
+        in special_countries.get(lower_country, [])
+        or f.get("properties", {}).get("name_en", "").lower()
+        in special_countries.get(lower_country, [])
+    ]
 
-    # Padded window
-    min_lon, max_lon = center_lon - lon_range / 2.0, center_lon + lon_range / 2.0
-    min_lat, max_lat = center_lat - lat_range / 2.0, center_lat + lat_range / 2.0
+    if not target_features:
+        raise ValueError(
+            f"Warning: Could not find geometry for '{country}' in world data."
+        )
 
-    # Recompute spans after padding/centering
-    lon_span = max_lon - min_lon
-    lat_span = max_lat - min_lat
+    # Center the globe on the (approximate) centroid of the target country
+    center_lon, center_lat = _country_centroid(target_features)
 
-    # If we're wrapping (e.g., Oceania), keep the span in the same wrap space
-    if wrap_center is not None:
-        min_w = _rewrap_lon(min_lon, wrap_center)
-        max_w = _rewrap_lon(max_lon, wrap_center)
-        lon_span = max_w - min_w
+    # Globe dimensions/placement (keep the same bottom-left anchor as before)
+    radius = 35
+    size = radius * 2.0
+    map_x, map_y = 20.0, CARD_HEIGHT - size - 20.0
+    cx, cy = radius, radius  # local center inside the group
 
-    # Mean cosine across the latitude band (better than using only center_lat)
-    phi_min = math.radians(min_lat)
-    phi_max = math.radians(max_lat)
-    if abs(phi_max - phi_min) < 1e-12:
-        cos_eff = math.cos(math.radians(center_lat))
-    else:
-        # mean(cos φ) = (sin φ2 − sin φ1) / (φ2 − φ1)
-        cos_eff = (math.sin(phi_max) - math.sin(phi_min)) / (phi_max - phi_min)
-
-    # Avoid blow-ups near the poles
-    cos_eff = max(cos_eff, 1e-3)
-
-    # Height/width ratio that equalizes meters-per-pixel near this latitude band
-    target_aspect = lat_span / (lon_span * cos_eff)
-
-    map_width = 80.0
-    map_height = map_width * target_aspect
-
-    map_max_height = 60.0
-    if map_height > map_max_height:
-        shrink_ratio = map_max_height / map_height
-        map_height = map_max_height
-        map_width *= shrink_ratio
-
-    map_x, map_y = 20, CARD_HEIGHT - map_height - 20
-
-    bbox = (min_lon, min_lat, max_lon, max_lat)
-
-    # ---- drawing ----
+    # Build the group and a circular clip (so only the front hemisphere shows)
     map_group = ET.Element(
         "g", {"id": "mini-map", "transform": f"translate({map_x}, {map_y})"}
     )
 
-    # Clip anything outside the mini-map rectangle (so outliers never show)
-    clip_id = f"mini-map-clip-{abs(hash((country, continent))) % 65535}"
+    clip_id = f"mini-globe-clip-{abs(hash((country, 'globe'))) % 65535}"
     defs = ET.SubElement(map_group, "defs")
     clip = ET.SubElement(defs, "clipPath", {"id": clip_id})
+    ET.SubElement(clip, "circle", {"cx": str(cx), "cy": str(cy), "r": str(radius)})
+
+    # Ocean/sphere background
     ET.SubElement(
-        clip,
-        "rect",
-        {"x": "0", "y": "0", "width": str(map_width), "height": str(map_height)},
+        map_group,
+        "circle",
+        {
+            "cx": str(cx),
+            "cy": str(cy),
+            "r": str(radius),
+            "fill": "#d8eef8",
+            "stroke": "#888",
+            "stroke-width": "0.5",
+        },
     )
 
-    countries_subgroup = ET.SubElement(
-        map_group, "g", {"id": "countries", "clip-path": f"url(#{clip_id})"}
-    )
+    # Container for land with clipping to the globe
+    land_group = ET.SubElement(map_group, "g", {"clip-path": f"url(#{clip_id})"})
 
-    special_countries = {
-        "united kingdom": ["england", "wales", "scotland", "northern ireland"]
-    }
-
-    for feature in continent_features:
-        properties = feature.get("properties", {})
-        country_name = properties.get("name", "") or properties.get("NAME", "")
-        geometry = feature.get("geometry", {}) or {}
-        path_d = geojson_to_svg_path(
-            geometry.get("coordinates", []),
-            bbox,
-            map_width,
-            map_height,
-            wrap_center=wrap_center,  # <— keep Oceania tidy
+    # Draw all countries (background land)
+    for feat in features:
+        geom = feat.get("geometry", {})
+        d = _geojson_to_ortho_path(
+            geom.get("coordinates", []),
+            lon0=center_lon,
+            lat0=center_lat,
+            radius=radius,
+            cx=cx,
+            cy=cy,
         )
-        if path_d:
-            is_target = (
-                country_name.lower() == lower_country
-                or country_name.lower() in special_countries.get(lower_country, [])
-            )
+        if d:
             ET.SubElement(
-                countries_subgroup,
+                land_group,
                 "path",
-                {
-                    "d": path_d,
-                    "fill": "#EC1E28" if is_target else "#f0f0f0",
-                    "stroke": "#EC1E28" if is_target else "#888",
-                    "stroke-width": "0.8" if is_target else "0.3",
-                },
+                {"d": d, "fill": "#f0f0f0", "stroke": "#888", "stroke-width": "0.3"},
             )
+
+    # Draw the target country on top in highlight color
+    for feat in target_features:
+        geom = feat.get("geometry", {})
+        d = _geojson_to_ortho_path(
+            geom.get("coordinates", []),
+            lon0=center_lon,
+            lat0=center_lat,
+            radius=radius,
+            cx=cx,
+            cy=cy,
+        )
+        if d:
+            ET.SubElement(
+                land_group,
+                "path",
+                {"d": d, "fill": "#EC1E28", "stroke": "#EC1E28", "stroke-width": "0.8"},
+            )
+
+    # Semi-transparent locator circle to make small countries stand out
+    # circle_r = radius * 0.24  # tweak size; 0.18–0.30 works well
+    # ET.SubElement(
+    #     land_group,
+    #     "circle",
+    #     {
+    #         "cx": str(cx),
+    #         "cy": str(cy),
+    #         "r": f"{circle_r:.2f}",
+    #         "fill": "#EC1E28",
+    #         "fill-opacity": "0.18",  # keep stroke fully opaque
+    #         "stroke": "#EC1E28",
+    #         "stroke-width": "0.8",
+    #     },
+    # )
 
     return map_group
 
@@ -500,7 +580,6 @@ def get_image_dimensions(image_path: str) -> Optional[Tuple[int, int]]:
 
 def create_country_card(
     country: str,
-    continent: str,
     code: str,
     image_path: str,
     template_path: str = TEMPLATE_PATH,
@@ -529,7 +608,7 @@ def create_country_card(
             img_width = original_width * scale_ratio
             img_height = original_height * scale_ratio
             img_x = (CARD_WIDTH / 2) - (img_width / 2)
-            img_y = 125 - (img_height / 2)
+            img_y = 120 - (img_height / 2)
             image_data = embed_image_as_base64(image_path)
             if image_data:
                 additional_content.append(
@@ -555,7 +634,7 @@ def create_country_card(
     country_paths = text_to_svg_group(
         text=country,
         x=CARD_WIDTH // 2,
-        y=50,
+        y=40,
         font_family="Arial",
         font_size=country_font_size,
         font_weight="bold",
@@ -569,36 +648,34 @@ def create_country_card(
         f'\n{ET.tostring(country_info_group, encoding="unicode")}'
     )
 
-    # Add mini continent map
-    map_group = create_mini_map_group(country, continent)
+    # Add mini map
+    map_group = create_mini_map_group(country)
     additional_content.append(f'\n{ET.tostring(map_group, encoding="unicode")}')
 
     # Add code in bottom right
     code_group = ET.Element("g", {"id": "country-code"})
-    ET.SubElement(
-        code_group,
-        "circle",
-        {
-            "cx": str(CARD_WIDTH - 40),
-            "cy": str(CARD_HEIGHT - 40),
-            "r": "16",
-            "fill": "#2BA6DE",
-            "opacity": "0.1",
-        },
-    )
+    # ET.SubElement(
+    #     code_group,
+    #     "circle",
+    #     {
+    #         "cx": str(CARD_WIDTH - 40),
+    #         "cy": str(CARD_HEIGHT - 40),
+    #         "r": "16",
+    #         "fill": "#2BA6DE",
+    #         "opacity": "0.1",
+    #     },
+    # )
     code_paths = text_to_svg_group(
         text=code,
-        x=CARD_WIDTH - 40,
-        y=CARD_HEIGHT - 36,
+        x=CARD_WIDTH - 32,
+        y=CARD_HEIGHT - 24,
         font_family="Courier New",
         font_size=15,
         font_weight="bold",
         text_anchor="middle",
         fill="#2BA6DE",
     )
-    if code_paths is not None:
-        code_group.append(code_paths)
-
+    code_group.append(code_paths)
     additional_content.append(f'\n{ET.tostring(code_group, encoding="unicode")}')
 
     final_svg = (
@@ -612,7 +689,6 @@ def create_country_card(
 
 def generate_card_from_country(
     country: str,
-    continent: str,
     code: str,
     image_path: str,
     output_dir: str = "country_cards",
@@ -631,7 +707,6 @@ def generate_card_from_country(
 
     svg_content = create_country_card(
         country,
-        continent,
         code=code,
         image_path=image_path,
         template_path=template_path,
@@ -653,11 +728,10 @@ def main():
 
     codes_seen = set()
     for i, elem in enumerate(data):
-        if i > 1:
-            break
+        # if i >= 10:
+        #     break
         try:
             name = elem["Name"]
-            continent = lookup_continent(name)
             code = elem["Code"]
             if code in codes_seen:
                 raise ValueError(f"Duplicate code {code} for {name}")
@@ -667,9 +741,7 @@ def main():
             continue
 
         img_path = make_image(country=name)
-        generate_card_from_country(
-            country=name, continent=continent, code=code, image_path=img_path
-        )
+        generate_card_from_country(country=name, code=code, image_path=img_path)
 
 
 if __name__ == "__main__":

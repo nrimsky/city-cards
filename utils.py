@@ -3,7 +3,7 @@ import numpy as np
 
 
 def preprocess_png_to_white_background(
-    input_path: str, output_path: str = None, threshold: int = 230
+    input_path: str, output_path: str = None, threshold: int = 235
 ) -> str:
     try:
         img = Image.open(input_path).convert("RGBA")
@@ -37,7 +37,7 @@ def crop_white_borders(
     input_path: str,
     output_path: str = None,
     max_padding: int = 10,
-    white_threshold: int = 230,
+    white_threshold: int = 235,
 ) -> str:
     try:
         img = Image.open(input_path).convert("RGBA")

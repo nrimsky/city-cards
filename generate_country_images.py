@@ -12,7 +12,7 @@ API_KEY = os.getenv("GOOGLE_API_KEY")
 
 client = genai.Client(api_key=API_KEY)
 
-TEMPLATE = "Generate a representative scene from the country {country}, minimalist, aquarelle, plain bright exactly white background, no text."
+TEMPLATE = "Generate a representative scene from the country {country}. Avoid country outline shapes. Minimalist, aquarelle, plain bright exactly white background, no text."
 
 
 def make_image(country: str, dir: str = "country_images"):

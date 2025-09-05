@@ -10,7 +10,7 @@ import urllib.request
 import urllib.parse
 from typing import Tuple, Optional, List, Dict
 import xml.etree.ElementTree as ET
-import hashlib
+import random
 import os
 import base64
 import csv
@@ -231,39 +231,33 @@ def get_country_geojson(country_name: str) -> dict:
     Returns:
         GeoJSON dictionary with country boundaries
     """
-    # Using Natural Earth data - simplified country boundaries
-    url = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson"
-    try:
-        with urllib.request.urlopen(url) as response:
-            data = json.loads(response.read().decode("utf-8"))
-            # Filter to only include the specified country
-            filtered_features = []
-            for feature in data["features"]:
-                properties = feature.get("properties", {})
-                # Check various name fields for match
-                name_fields = ["NAME", "NAME_EN", "ADMIN", "SOVEREIGNT"]
-                for field in name_fields:
-                    if properties.get(field, "").lower() == country_name.lower():
-                        filtered_features.append(feature)
-                        break
+    with open("world.geojson", "r") as f:
+        data = json.load(f)
+    # Filter to only include the specified country
+    name_fields = ["name", "name_long", "admin", "sovereignt", "name_en"]
+    filtered_features = []
+    for feature in data["features"]:
+        properties = feature.get("properties", {})
+        # Check various name fields for match
+        for field in name_fields:
+            if properties.get(field, "").lower() == country_name.lower():
+                filtered_features.append(feature)
+                break
 
+    if filtered_features:
+        return {"type": "FeatureCollection", "features": filtered_features}
+    else:
+        # If country not found by exact match, try partial match
+        for feature in data["features"]:
+            properties = feature.get("properties", {})
+            for field in name_fields:
+                if country_name.lower() in properties.get(field, "").lower():
+                    filtered_features.append(feature)
+                    break
             if filtered_features:
-                return {"type": "FeatureCollection", "features": filtered_features}
-            else:
-                # If country not found by exact match, try partial match
-                for feature in data["features"]:
-                    properties = feature.get("properties", {})
-                    for field in name_fields:
-                        if country_name.lower() in properties.get(field, "").lower():
-                            filtered_features.append(feature)
-                            break
-                    if filtered_features:
-                        break
+                break
 
-                return {"type": "FeatureCollection", "features": filtered_features}
-    except Exception as e:
-        print(f"Error fetching country boundaries: {e}")
-        return None
+        return {"type": "FeatureCollection", "features": filtered_features}
 
 
 def get_bounds_for_country(country_data: dict, country_name: str = None):
@@ -613,28 +607,6 @@ def create_mini_map_group(city: str, country: str) -> ET.Element:
     return map_group
 
 
-def generate_city_code(city: str, country: str) -> str:
-    """
-    Generate a unique 3-letter code for a city/country combination.
-    Args:
-        city: City name
-        country: Country name
-    Returns:
-        3-letter code
-    """
-    # Create a hash of the city and country
-    combined = f"{city.upper()}{country.upper()}"
-    hash_obj = hashlib.md5(combined.encode())
-    hash_hex = hash_obj.hexdigest()
-    # Convert hash to uppercase letters
-    code = ""
-    for i in range(0, 6, 2):
-        # Convert pairs of hex digits to letters A-Z
-        num = int(hash_hex[i : i + 2], 16) % 26
-        code += chr(65 + num)
-    return code[:3]
-
-
 def load_card_template(filepath: str = CARD_TEMPLATE) -> str:
     """
     Load the card template SVG as a string.
@@ -672,7 +644,7 @@ def get_image_dimensions(image_path: str) -> Optional[Tuple[int, int]]:
 def create_city_card(
     city: str,
     country: str,
-    code: str = None,
+    code: str,
     image_path: str = None,
     template_path: str = CARD_TEMPLATE,
 ) -> str:
@@ -777,9 +749,6 @@ def create_city_card(
     map_group = create_mini_map_group(city, country)
     additional_content.append(f'\n{ET.tostring(map_group, encoding="unicode")}')
 
-    if code is None:
-        code = generate_city_code(city, country)
-
     code_group = ET.Element("g", {"id": "city-code"})
     ET.SubElement(
         code_group,
@@ -819,7 +788,7 @@ def create_city_card(
 def generate_card_from_city(
     city: str,
     country: str,
-    code: str = None,
+    code: str,
     image_path: str = None,
     output_dir: str = "world_city_cards",
     template_path: str = CARD_TEMPLATE,
@@ -849,18 +818,17 @@ def main():
     data = csv.DictReader(open("world_cities.csv"))
     codes_seen = set()
     for i, elem in enumerate(data):
-        # if i >= 1:
-        #     break
+        if i > 2:
+            break
         try:
             name = elem["Name"]
-            # if len(name) < 16:
-            #     continue
             country = elem["Country"]
-            code = elem.get("Code", None)
-            if code is not None:
-                if code in codes_seen:
-                    raise ValueError(f"Duplicate code {code} for {name}, {country}")
-                codes_seen.add(code)
+            code = random.randint(0, 999)
+            while code in codes_seen:
+                code = random.randint(0, 999)
+            codes_seen.add(code)
+            # convert to DDD string
+            code = f"{code:03d}"
         except Exception as e:
             print(f"Error reading row {elem}: {e}")
             continue
