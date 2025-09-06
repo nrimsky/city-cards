@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
+python svg2png_batch.py ./state_cards ./state_cards_png --width 750
 python svg2png_batch.py ./country_cards ./country_cards_png --width 750
+python svg2png_batch.py ./city_cards ./city_cards_png --width 750
+python svg2png_batch.py ./world_city_cards ./world_city_cards_png --width 750
 
  --height 1125
 """

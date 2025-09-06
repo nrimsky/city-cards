@@ -1,444 +1,27 @@
-import json
-import urllib.request
-from typing import Tuple, Optional, List, Dict
 import xml.etree.ElementTree as ET
 import os
-import base64
 import csv
-from fontTools.ttLib import TTFont
-from fontTools.pens.svgPathPen import SVGPathPen
 from generate_state_images import make_image
-from PIL import Image
 
-TEMPLATE_PATH = "border_card.svg"
+from helpers import (
+    CARD_HEIGHT,
+    CARD_WIDTH,
+    embed_image_as_base64,
+    get_image_dimensions,
+    get_text_width,
+    load_card_template,
+    text_to_svg_group,
+)
+from us_map import create_mini_map_group
 
-FONT_MAPPING: Dict[Tuple[str, str], str] = {
-    ("Arial", "normal"): "/System/Library/Fonts/Supplemental/Arial.ttf",
-    ("Arial", "bold"): "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-    ("Courier New", "bold"): "/System/Library/Fonts/Supplemental/Courier New Bold.ttf",
-}
-
-# A simple cache to avoid reloading font files from disk repeatedly.
-_FONT_CACHE: Dict[Tuple[str, str], TTFont] = {}
-
-# Constants for mini map dimensions
 MAP_WIDTH = 80
 MAP_HEIGHT = 50
-# Card dimensions
-CARD_WIDTH = 180
-CARD_HEIGHT = 270
-
-
-def get_font(family: str, weight: str) -> Optional[TTFont]:
-    """Loads a font from the FONT_MAPPING, using a cache for performance."""
-    key = (family, weight)
-    if key in _FONT_CACHE:
-        return _FONT_CACHE[key]
-
-    font_path = FONT_MAPPING.get(key)
-    if not font_path or not os.path.exists(font_path):
-        # Fallback to normal weight if specific weight is not found
-        fallback_key = (family, "normal")
-        font_path = FONT_MAPPING.get(fallback_key)
-        if not font_path or not os.path.exists(font_path):
-            print(f"Warning: Font for '{family}' ({weight}) not found.")
-            print(
-                f"  Attempted paths: {FONT_MAPPING.get(key)} and {FONT_MAPPING.get(fallback_key)}"
-            )
-            return None
-
-    try:
-        font = TTFont(font_path)
-        _FONT_CACHE[key] = font
-        return font
-    except Exception as e:
-        print(f"Error loading font {font_path}: {e}")
-        return None
-
-
-def text_to_svg_group(
-    text: str,
-    x: float,
-    y: float,
-    font_family: str,
-    font_size: float,
-    font_weight: str = "normal",
-    text_anchor: str = "start",
-    fill: str = "#000",
-    **kwargs,
-) -> Optional[ET.Element]:
-    """
-    Converts a text string to an SVG group of paths using fontTools.
-
-    Returns:
-        An ET.Element <g> containing the text rendered as <path> elements, or None.
-    """
-    font = get_font(font_family, font_weight)
-    if font is None:
-        # Return a fallback text element if font is missing
-        error_text = ET.Element(
-            "text",
-            {
-                "x": str(x),
-                "y": str(y),
-                "font-size": str(font_size / 2),
-                "fill": "red",
-                "text-anchor": text_anchor,
-            },
-        )
-        error_text.text = f"[Font '{font_family}' not found]"
-        return error_text
-
-    glyph_set = font.getGlyphSet()
-    cmap = font.get("cmap").getBestCmap()
-    hmtx = font.get("hmtx")
-    units_per_em = font["head"].unitsPerEm
-    scale = font_size / units_per_em
-
-    # Calculate total width for text-anchor
-    total_width = 0
-    for char in text:
-        if ord(char) in cmap:
-            glyph_name = cmap[ord(char)]
-            total_width += hmtx[glyph_name][0]
-    total_width *= scale
-
-    # Adjust starting x position based on text-anchor
-    start_x = x
-    if text_anchor == "middle":
-        start_x = x - (total_width / 2)
-    elif text_anchor == "end":
-        start_x = x - total_width
-
-    # Adjust baseline y position for vertical alignment
-    y_baseline = y
-
-    group = ET.Element("g", {"fill": fill, **kwargs})
-    current_x = start_x
-
-    # Generate a path for each character
-    for char in text:
-        if ord(char) not in cmap:
-            # Handle space character
-            if char == " ":
-                # Advance by space width (typically 0.25em)
-                current_x += font_size * 0.25
-            continue
-        glyph_name = cmap[ord(char)]
-
-        pen = SVGPathPen(glyph_set)
-        glyph = glyph_set[glyph_name]
-        glyph.draw(pen)
-
-        path_d = pen.getCommands()
-        if path_d:  # Only create a path if it has drawing commands
-            # Y-axis is flipped in font coordinates vs. SVG
-            transform = f"translate({current_x} {y_baseline}) scale({scale} {-scale})"
-            ET.SubElement(group, "path", {"d": path_d, "transform": transform})
-
-        # Advance to the next character position
-        advance_width = hmtx[glyph_name][0] * scale
-        current_x += advance_width
-
-    return group
-
-
-def get_text_width(
-    text: str, font_family: str, font_size: float, font_weight: str = "normal"
-) -> float:
-    """Calculates the rendered width of a text string for a given font."""
-    font = get_font(font_family, font_weight)
-    if font is None:
-        return 0  # Cannot calculate width if font is missing
-
-    cmap = font.get("cmap").getBestCmap()
-    hmtx = font.get("hmtx")
-    units_per_em = font["head"].unitsPerEm
-    scale = font_size / units_per_em
-
-    total_width_in_font_units = 0
-    for char in text:
-        if ord(char) in cmap:
-            glyph_name = cmap[ord(char)]
-            total_width_in_font_units += hmtx[glyph_name][0]
-        elif char == " ":
-            # Approximate space width
-            total_width_in_font_units += units_per_em * 0.25
-
-    return total_width_in_font_units * scale
-
-
-def embed_image_as_base64(image_path: str) -> str:
-    """
-    Convert image to base64 data URI for embedding in SVG.
-    Returns the data URI string or None if image cannot be loaded.
-    """
-    try:
-        with open(image_path, "rb") as img_file:
-            img_data = img_file.read()
-            # Determine MIME type from extension
-            ext = os.path.splitext(image_path)[1].lower()
-            mime_types = {
-                ".jpg": "image/jpeg",
-                ".jpeg": "image/jpeg",
-                ".png": "image/png",
-                ".gif": "image/gif",
-            }
-            mime_type = mime_types.get(ext, "image/jpeg")
-            base64_string = base64.b64encode(img_data).decode("utf-8")
-            return f"data:{mime_type};base64,{base64_string}"
-    except Exception as e:
-        print(f"Warning: Could not load image {image_path}: {e}")
-        return None
-
-
-def get_image_dimensions(image_path: str) -> Optional[Tuple[int, int]]:
-    """Gets the width and height of an image file using Pillow."""
-    try:
-        with Image.open(image_path) as img:
-            return img.size  # returns (width, height)
-    except Exception as e:
-        print(f"Warning: Could not read dimensions from image {image_path}: {e}")
-        return None
-
-
-def get_us_states_geojson(
-    state_filter: str = None, highlight_state: str = None
-) -> dict:
-    """
-    Fetch US states GeoJSON data from a public source.
-    Args:
-        state_filter: If provided, only return this specific state
-        highlight_state: State to be highlighted in the map
-    Returns:
-        GeoJSON dictionary with state boundaries
-    """
-    url = "https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json"
-    try:
-        with urllib.request.urlopen(url) as response:
-            data = json.loads(response.read().decode("utf-8"))
-
-            # Mark which state should be highlighted
-            if highlight_state:
-                for feature in data["features"]:
-                    state_name = feature.get("properties", {}).get("name", "")
-                    feature["properties"]["highlighted"] = (
-                        state_name.lower() == highlight_state.lower()
-                    )
-
-            if state_filter:
-                # Filter to only include the specified state
-                filtered_features = []
-                for feature in data["features"]:
-                    state_name = feature.get("properties", {}).get("name", "")
-                    if state_name.lower() == state_filter.lower():
-                        filtered_features.append(feature)
-                return {"type": "FeatureCollection", "features": filtered_features}
-            else:
-                # Return continental US only (exclude Alaska, Hawaii, Puerto Rico) for minimap
-                # unless we're highlighting one of those states
-                filtered_features = []
-                excluded_states = ["Alaska", "Hawaii", "Puerto Rico"]
-                show_disconnected = highlight_state and any(
-                    highlight_state.lower() == s.lower() for s in excluded_states
-                )
-
-                if show_disconnected:
-                    # If highlighting a disconnected state, only show that state
-                    for feature in data["features"]:
-                        state_name = feature.get("properties", {}).get("name", "")
-                        if state_name.lower() == highlight_state.lower():
-                            filtered_features.append(feature)
-                else:
-                    # Show continental US
-                    for feature in data["features"]:
-                        state_name = feature.get("properties", {}).get("name", "")
-                        if state_name not in excluded_states:
-                            filtered_features.append(feature)
-
-                return {"type": "FeatureCollection", "features": filtered_features}
-    except Exception as e:
-        print(f"Error fetching state boundaries: {e}")
-        return None
-
-
-def project_coordinates_for_state(
-    lon: float, lat: float, state: str, width: int = MAP_WIDTH, height: int = MAP_HEIGHT
-) -> Tuple[float, float]:
-    """
-    Project longitude/latitude to SVG coordinates for a specific state.
-    """
-    state_lower = state.lower()
-    # Define bounds for each disconnected state
-    if state_lower in ["alaska", "ak"]:
-        min_lon, max_lon = -180, -130
-        min_lat, max_lat = 52, 72
-    elif state_lower in ["hawaii", "hi"]:
-        min_lon, max_lon = -161, -154
-        min_lat, max_lat = 18, 23
-    elif state_lower in ["puerto rico", "pr"]:
-        min_lon, max_lon = -68, -65
-        min_lat, max_lat = 17.5, 18.6
-    else:
-        # Continental US
-        min_lon, max_lon = -125, -66
-        min_lat, max_lat = 24, 50
-    # Add padding
-    padding = 0.1
-    x_ratio = (lon - min_lon) / (max_lon - min_lon)
-    y_ratio = (lat - min_lat) / (max_lat - min_lat)
-    x = x_ratio * width * (1 - 2 * padding) + width * padding
-    y = height - (y_ratio * height * (1 - 2 * padding) + height * padding)
-    return (x, y)
-
-
-def geojson_to_svg_path(
-    coordinates: List, width: int, height: int, state: str = None
-) -> str:
-    """
-    Convert GeoJSON coordinates to SVG path string.
-    """
-    if not coordinates:
-        return ""
-    path_parts = []
-    for polygon in coordinates:
-        if isinstance(polygon[0][0], list):
-            rings = polygon
-        else:
-            rings = [polygon]
-        for ring in rings:
-            if not ring:
-                continue
-            first_point = ring[0]
-            if state:
-                x, y = project_coordinates_for_state(
-                    first_point[0], first_point[1], state, width, height
-                )
-            else:
-                # Use simple projection for continental US
-                min_lon, max_lon = -125, -66
-                min_lat, max_lat = 24, 50
-                x_ratio = (first_point[0] - min_lon) / (max_lon - min_lon)
-                y_ratio = (first_point[1] - min_lat) / (max_lat - min_lat)
-                x = x_ratio * width * 0.9 + width * 0.05
-                y = height - (y_ratio * height * 0.85 + height * 0.1)
-            path_parts.append(f"M {x:.2f},{y:.2f}")
-            for point in ring[1:]:
-                if state:
-                    x, y = project_coordinates_for_state(
-                        point[0], point[1], state, width, height
-                    )
-                else:
-                    x_ratio = (point[0] - min_lon) / (max_lon - min_lon)
-                    y_ratio = (point[1] - min_lat) / (max_lat - min_lat)
-                    x = x_ratio * width * 0.9 + width * 0.05
-                    y = height - (y_ratio * height * 0.85 + height * 0.1)
-                path_parts.append(f"L {x:.2f},{y:.2f}")
-            path_parts.append("Z")
-    return " ".join(path_parts)
-
-
-def create_mini_map_group(state_name: str, x_offset: int, y_offset: int) -> ET.Element:
-    """
-    Create a group element containing the mini US map with state highlighted.
-    Args:
-        state_name: State name to highlight
-        x_offset: X position for the map group
-        y_offset: Y position for the map group
-    Returns:
-        ET.Element group containing the map
-    """
-    # Check if state is disconnected
-    disconnected_states = {
-        "alaska": "Alaska",
-        "hawaii": "Hawaii",
-        "puerto rico": "Puerto Rico",
-        "district of columbia": "District of Columbia",
-    }
-    state_lower = state_name.lower()
-    is_disconnected = state_lower in disconnected_states
-    state_filter = disconnected_states.get(state_lower) if is_disconnected else None
-
-    # Get state boundaries with highlight info
-    states_data = get_us_states_geojson(state_filter, highlight_state=state_name)
-
-    # Create group for the mini map
-    map_group = ET.Element(
-        "g", {"id": "mini-map", "transform": f"translate({x_offset}, {y_offset})"}
-    )
-    if not states_data:
-        # Add error text if map data couldn't be loaded
-        ET.SubElement(
-            map_group, "text", {"x": "5", "y": "25", "font-size": "8", "fill": "#666"}
-        ).text = "Map unavailable"
-        return map_group
-
-    # Draw states
-    states_subgroup = ET.SubElement(map_group, "g", {"id": "states"})
-    for feature in states_data.get("features", []):
-        geometry = feature.get("geometry", {})
-        properties = feature.get("properties", {})
-        is_highlighted = properties.get("highlighted", False)
-
-        if geometry.get("type") == "Polygon":
-            coordinates = geometry.get("coordinates", [])
-            path_d = geojson_to_svg_path(
-                coordinates, MAP_WIDTH, MAP_HEIGHT, state_filter
-            )
-        elif geometry.get("type") == "MultiPolygon":
-            path_d = ""
-            for polygon in geometry.get("coordinates", []):
-                path_d += (
-                    geojson_to_svg_path([polygon], MAP_WIDTH, MAP_HEIGHT, state_filter)
-                    + " "
-                )
-        else:
-            continue
-
-        if path_d:
-            # Use different colors for highlighted state
-            if is_highlighted:
-                fill_color = "#2BA6DE"
-                stroke_color = "#1976D2"
-                stroke_width = "0.8"
-                opacity = "0.7"
-            else:
-                fill_color = "#f0f0f0"
-                stroke_color = "#888"
-                stroke_width = "0.3"
-                opacity = "1.0"
-
-            ET.SubElement(
-                states_subgroup,
-                "path",
-                {
-                    "d": path_d,
-                    "fill": fill_color,
-                    "stroke": stroke_color,
-                    "stroke-width": stroke_width,
-                    "opacity": opacity,
-                },
-            )
-
-    return map_group
-
-
-def load_card_template(filepath: str = TEMPLATE_PATH) -> str:
-    """
-    Load the card template SVG as a string.
-    """
-    with open(filepath, "r") as f:
-        content = f.read()
-    # Remove any namespace prefixes if present
-    content = content.replace("ns0:", "").replace(":ns0", "")
-    return content
 
 
 def create_state_card(
     state_name: str,
     state_abbr: str,
     image_path: str = None,
-    template_path: str = TEMPLATE_PATH,
 ) -> str:
     """
     Create a playing card for a US state with text converted to paths.
@@ -450,7 +33,7 @@ def create_state_card(
     Returns:
         SVG string for the card
     """
-    template_content = load_card_template(template_path)
+    template_content = load_card_template()
     closing_tag_pos = template_content.rfind("</svg>")
     if closing_tag_pos == -1:
         print("Warning: Could not find closing SVG tag in template")
@@ -502,7 +85,7 @@ def create_state_card(
 
     initial_width = get_text_width(
         text=state_name,
-        font_family="Arial",
+        font_family="Sans",
         font_size=state_font_size,
         font_weight="bold",
     )
@@ -517,7 +100,7 @@ def create_state_card(
         text=state_name,
         x=CARD_WIDTH // 2,
         y=40,
-        font_family="Arial",
+        font_family="Sans",
         font_size=state_font_size,
         font_weight="bold",
         text_anchor="middle",
@@ -531,7 +114,7 @@ def create_state_card(
         text=state_abbr.upper(),
         x=CARD_WIDTH // 2,
         y=58,
-        font_family="Arial",
+        font_family="Sans",
         font_size=14,
         font_weight="normal",
         text_anchor="middle",
@@ -546,7 +129,7 @@ def create_state_card(
     # Center the map horizontally: (CARD_WIDTH - MAP_WIDTH) / 2
     map_x = (CARD_WIDTH - MAP_WIDTH) // 2
     map_y = CARD_HEIGHT - MAP_HEIGHT - 20
-    map_group = create_mini_map_group(state_name, map_x, map_y)
+    map_group = create_mini_map_group(state_name, map_x, map_y, MAP_WIDTH, MAP_HEIGHT)
     additional_content.append(f'\n{ET.tostring(map_group, encoding="unicode")}')
 
     # --- State Code Circle REMOVED ---
@@ -567,7 +150,6 @@ def generate_state_card_file(
     state_abbr: str,
     image_path: str = None,
     output_dir: str = "state_cards",
-    template_path: str = TEMPLATE_PATH,
     skip_if_exists: bool = True,
 ):
     """
@@ -589,7 +171,6 @@ def generate_state_card_file(
         state_name,
         state_abbr,
         image_path=image_path,
-        template_path=template_path,
     )
 
     # Save to file
@@ -599,67 +180,31 @@ def generate_state_card_file(
 
 
 def main():
-    """
-    Main function to generate state cards from CSV file.
-    """
-    print("Starting US State Cards Generation")
-    print("=" * 50)
-
-    # Read states from CSV file
-    # Expected columns: Name, Abbreviation
     csv_file = "states.csv"
+    with open(csv_file, "r") as f:
+        data = csv.DictReader(f)
+        for i, elem in enumerate(data):
+            # if i > 1:
+            #     break
+            # Read state information from CSV
+            state_name = elem.get("Name", "").strip()
+            state_abbr = elem.get("Abbreviation", "").strip()
 
-    try:
-        with open(csv_file, "r") as f:
-            data = csv.DictReader(f)
+            if not state_name or not state_abbr:
+                print(f"Warning: Skipping row {i+1} - missing Name or Abbreviation")
+                continue
 
-            for i, elem in enumerate(data):
-                # if i > 0:
-                #     break
-                try:
-                    # Read state information from CSV
-                    state_name = elem.get("Name", "").strip()
-                    state_abbr = elem.get("Abbreviation", "").strip()
+            # Generate image using make_image from generate_state_images
+            img_path = make_image(state=state_name)
 
-                    if not state_name or not state_abbr:
-                        print(
-                            f"Warning: Skipping row {i+1} - missing Name or Abbreviation"
-                        )
-                        continue
-
-                    # Generate image using make_image from generate_state_images
-                    img_path = make_image(state=state_name)
-
-                    # Generate the card
-                    generate_state_card_file(
-                        state_name=state_name,
-                        state_abbr=state_abbr,
-                        image_path=img_path,
-                        output_dir="state_cards",
-                        template_path=TEMPLATE_PATH,
-                        skip_if_exists=True,
-                    )
-
-                except Exception as e:
-                    print(f"Error processing row {i+1} ({elem}): {e}")
-                    continue
-
-    except FileNotFoundError:
-        print(f"Error: CSV file '{csv_file}' not found.")
-        print("Please create a CSV file with columns: Name, Abbreviation")
-        print("\nExample CSV content:")
-        print("Name,Abbreviation")
-        print("California,CA")
-        print("Texas,TX")
-        print("New York,NY")
-        return
-    except Exception as e:
-        print(f"Error reading CSV file: {e}")
-        return
-
-    print("=" * 50)
-    print("State cards generation complete!")
-    print(f"Cards saved to: state_cards/")
+            # Generate the card
+            generate_state_card_file(
+                state_name=state_name,
+                state_abbr=state_abbr,
+                image_path=img_path,
+                output_dir="state_cards",
+                skip_if_exists=True,
+            )
 
 
 if __name__ == "__main__":
