@@ -4,7 +4,7 @@ from io import BytesIO
 import os
 from dotenv import load_dotenv
 
-from utils import crop_white_borders, preprocess_png_to_white_background
+from img_utils import crop_white_borders, preprocess_png_to_white_background
 
 load_dotenv()
 

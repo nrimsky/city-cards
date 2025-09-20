@@ -5,8 +5,10 @@ import base64
 from fontTools.ttLib import TTFont
 from fontTools.pens.svgPathPen import SVGPathPen
 from PIL import Image
+import random
 
-CARD_TEMPLATE = "border_card.svg"
+# CARD_TEMPLATE = "border_card.svg"  # use for testing
+CARD_TEMPLATE = "card.svg"
 
 FONT_MAPPING: Dict[Tuple[str, str], str] = {
     ("Sans", "normal"): "./fonts/Cabin-Regular.ttf",
@@ -201,3 +203,10 @@ def get_image_dimensions(image_path: str) -> Optional[Tuple[int, int]]:
     except Exception as e:
         print(f"Warning: Could not read dimensions from image {image_path}: {e}")
         return None
+
+
+def get_codes(n: int) -> list[str]:
+    numbers = list(range(0, 999))
+    codes = random.sample(numbers, n)
+    codes_str = [f"{code:03d}" for code in codes]
+    return codes_str

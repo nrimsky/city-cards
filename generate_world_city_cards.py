@@ -140,8 +140,7 @@ def create_city_card(
         text_anchor="middle",
         fill="#2BA6DE",
     )
-    if code_paths is not None:
-        code_group.append(code_paths)
+    code_group.append(code_paths)
 
     additional_content.append(f'\n{ET.tostring(code_group, encoding="unicode")}')
 

@@ -8,6 +8,7 @@ from helpers import (
     CARD_HEIGHT,
     CARD_WIDTH,
     embed_image_as_base64,
+    get_codes,
     get_image_dimensions,
     get_text_width,
     load_card_template,
@@ -135,7 +136,7 @@ def create_city_card(
 
     additional_content.append(f'\n{ET.tostring(city_info_group, encoding="unicode")}')
 
-    map_x, map_y = 20, CARD_HEIGHT - MAP_HEIGHT - 20
+    map_x, map_y = 18, CARD_HEIGHT - MAP_HEIGHT - 18
     map_group = create_mini_map_group(
         state, map_x, map_y, map_width=MAP_WIDTH, map_height=MAP_HEIGHT, city_name=city
     )
@@ -145,29 +146,17 @@ def create_city_card(
         code = generate_city_code(city, state)
 
     code_group = ET.Element("g", {"id": "city-code"})
-    ET.SubElement(
-        code_group,
-        "circle",
-        {
-            "cx": str(CARD_WIDTH - 40),
-            "cy": str(CARD_HEIGHT - 40),
-            "r": "16",
-            "fill": "#2BA6DE",
-            "opacity": "0.1",
-        },
-    )
     code_paths = text_to_svg_group(
         text=code,
-        x=CARD_WIDTH - 40,
-        y=CARD_HEIGHT - 36,
+        x=CARD_WIDTH - 36,
+        y=CARD_HEIGHT - 23,
         font_family="Mono",
         font_size=15,
         font_weight="bold",
         text_anchor="middle",
         fill="#2BA6DE",
     )
-    if code_paths is not None:
-        code_group.append(code_paths)
+    code_group.append(code_paths)
 
     additional_content.append(f'\n{ET.tostring(code_group, encoding="unicode")}')
 
@@ -206,20 +195,15 @@ def generate_card_from_city(
 
 def main():
     data = csv.DictReader(open("cities.csv"))
-    codes_seen = set()
-    for i, elem in enumerate(data):
-        # if i >= 1:
-        #     break
+    data = list(data)
+    n = len(data)
+    print(f"Loaded {n} cities from CSV.")
+    codes = get_codes(n)
+    for elem in data:
         try:
             name = elem["Name"]
-            # if len(name) < 16:
-            #     continue
             state = elem["State"]
-            code = elem.get("Code", None)
-            if code is not None:
-                if code in codes_seen:
-                    raise ValueError(f"Duplicate code {code} for {name}, {state}")
-                codes_seen.add(code)
+            code = codes.pop()
         except Exception as e:
             print(f"Error reading row {elem}: {e}")
             continue

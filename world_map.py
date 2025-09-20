@@ -223,7 +223,7 @@ def create_mini_map_group(
     # Globe dimensions/placement (keep the same bottom-left anchor as before)
     radius = 35
     size = radius * 2.0
-    map_x, map_y = 20.0, card_height - size - 20.0
+    map_x, map_y = 23.0, card_height - size - 23.0
     cx, cy = radius, radius  # local center inside the group
 
     # Build the group and a circular clip (so only the front hemisphere shows)

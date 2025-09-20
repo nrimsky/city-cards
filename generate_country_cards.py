@@ -6,6 +6,7 @@ from helpers import (
     CARD_HEIGHT,
     CARD_WIDTH,
     embed_image_as_base64,
+    get_codes,
     get_image_dimensions,
     get_text_width,
     load_card_template,
@@ -91,7 +92,7 @@ def create_country_card(
     code_group = ET.Element("g", {"id": "country-code"})
     code_paths = text_to_svg_group(
         text=code,
-        x=CARD_WIDTH - 32,
+        x=CARD_WIDTH - 36,
         y=CARD_HEIGHT - 24,
         font_family="Mono",
         font_size=15,
@@ -148,16 +149,13 @@ def main():
     except FileNotFoundError:
         raise FileNotFoundError(f"CSV file {csv_path} not found.")
 
-    codes_seen = set()
-    for i, elem in enumerate(data):
-        # if i > 1:
-        #     break
+    n = len(data)
+    codes = get_codes(n)
+
+    for elem in data:
         try:
             name = elem["Name"]
-            code = elem["Code"]
-            if code in codes_seen:
-                raise ValueError(f"Duplicate code {code} for {name}")
-            codes_seen.add(code)
+            code = codes.pop()
         except Exception as e:
             print(f"Error reading row {elem}: {e}")
             continue
